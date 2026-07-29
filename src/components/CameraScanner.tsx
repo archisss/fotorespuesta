@@ -143,6 +143,8 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
     if (file) {
       processFile(file);
     }
+    // Reset file input so taking or selecting another photo always triggers onChange
+    e.target.value = '';
   };
 
   const processFile = (file: File) => {
