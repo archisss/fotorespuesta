@@ -37,18 +37,18 @@ async function executeOpenAiVisionRequest(apiKey: string, mimeType: string, base
       Authorization: `Bearer ${apiKey.trim()}`,
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "Eres un asistente experto en resolver exámenes y preguntas. Analiza la imagen. Devuelve un objeto JSON con los campos: questionText (string), directAnswer (string enérgico y conciso con la respuesta correcta), options (array de strings opcional), correctOptionIndex (number opcional -1 si no aplica), explanation (string breve), subject (string), confidence ('Alta'|'Media'|'Baja').",
+            "Eres un experto académico de élite resolviendo exámenes y cuestionarios. Analiza la imagen minuciosamente. Lee la pregunta completa y todas las opciones. Verifica rigurosamente la respuesta antes de seleccionarla. Devuelve un objeto JSON con los campos: questionText (string transcrito exactamente), directAnswer (string claro y directo con la respuesta correcta), options (array de strings con las opciones presentes en la foto), correctOptionIndex (number 0-based de la opción correcta, o -1), explanation (string conciso y riguroso con la justificación), subject (string de la materia), confidence ('Alta'|'Media'|'Baja').",
         },
         {
           role: "user",
           content: [
-            { type: "text", text: "Obtén ÚNICAMENTE la respuesta correcta a la pregunta de la imagen." },
+            { type: "text", text: "Obtén la RESPUESTA CORRECTA exacta a la pregunta mostrada en esta imagen." },
             { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Data}` } },
           ],
         },
@@ -57,8 +57,49 @@ async function executeOpenAiVisionRequest(apiKey: string, mimeType: string, base
   });
 
   if (!openAiResponse.ok) {
-    const errData = await openAiResponse.json().catch(() => ({}));
-    throw new Error(errData.error?.message || `Error de OpenAI status ${openAiResponse.status}`);
+    // If gpt-4o fails or is not accessible, fallback to gpt-4o-mini
+    const retryResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey.trim()}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "Eres un experto académico resolviendo exámenes. Analiza la imagen. Devuelve JSON con: questionText, directAnswer, options, correctOptionIndex (0-based o -1), explanation, subject, confidence.",
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Obtén la respuesta correcta exacta a la pregunta de la imagen." },
+              { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Data}` } },
+            ],
+          },
+        ],
+      }),
+    });
+    if (!retryResponse.ok) {
+      const errData = await retryResponse.json().catch(() => ({}));
+      throw new Error(errData.error?.message || `Error de OpenAI status ${retryResponse.status}`);
+    }
+    const retryData = await retryResponse.json();
+    const contentStr = retryData.choices?.[0]?.message?.content;
+    if (!contentStr) throw new Error("Respuesta vacía de OpenAI");
+    const parsed = JSON.parse(contentStr);
+    return {
+      questionText: parsed.questionText || "Pregunta detectada en la imagen",
+      directAnswer: parsed.directAnswer || "No se pudo determinar la respuesta",
+      options: Array.isArray(parsed.options) ? parsed.options : undefined,
+      correctOptionIndex: typeof parsed.correctOptionIndex === "number" && parsed.correctOptionIndex >= 0 ? parsed.correctOptionIndex : null,
+      explanation: parsed.explanation || "Respuesta generada automáticamente.",
+      subject: parsed.subject || "General",
+      confidence: parsed.confidence || "Alta",
+    };
   }
 
   const openAiData = await openAiResponse.json();
@@ -131,10 +172,60 @@ app.post("/api/answer-question", async (req, res) => {
     let response;
     let geminiError: any = null;
 
+    const visionPrompt = `Analiza la imagen adjunta con máxima precisión académica. Contiene una pregunta de examen, cuestionario, libro o pantalla.
+Tu objetivo primordial es entregar la RESPUESTA CORRECTA exacta, clara y rigurosa.
+
+Sigue estas instrucciones obligatorias:
+1. Transcribe textualmente la pregunta completa que aparece en la imagen.
+2. Si hay opciones múltiples en la imagen, transcríbelas todas en el arreglo "options" en su orden exacto.
+3. Analiza internamente cada opción y resuelve la pregunta (si es matemática, lógica o conceptual, realiza los cálculos minuciosamente para no fallar).
+4. Determina la opción o respuesta correcta. 
+   - Si es de opción múltiple, indica en "correctOptionIndex" el índice exacto (0-based) de la opción correcta y en "directAnswer" especifica claramente la respuesta (ej. "Opción B: 25 km/h").
+   - Si es de respuesta abierta o cálculo, indica el resultado final exacto en "directAnswer" y pon -1 en "correctOptionIndex".
+5. Escribe una explicación concisa y clara (1 a 3 frases) justificando por qué es la respuesta correcta.
+6. Especifica la materia o asignatura (ej. Matemáticas, Física, Química, Biología, Historia, Lengua, etc.).
+7. Indica tu nivel de certeza: 'Alta', 'Media' o 'Baja'.`;
+
+    const jsonSchema = {
+      type: Type.OBJECT,
+      properties: {
+        questionText: {
+          type: Type.STRING,
+          description: "Texto exacto de la pregunta transcrito de la foto",
+        },
+        directAnswer: {
+          type: Type.STRING,
+          description: "La respuesta correcta directa y destacada",
+        },
+        options: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: "Opciones de respuesta si la pregunta es de opción múltiple",
+        },
+        correctOptionIndex: {
+          type: Type.INTEGER,
+          description: "Índice 0-based de la opción correcta si aplica, o -1",
+        },
+        explanation: {
+          type: Type.STRING,
+          description: "Breve justificación o explicación de la respuesta",
+        },
+        subject: {
+          type: Type.STRING,
+          description: "Materia o área temática de la pregunta",
+        },
+        confidence: {
+          type: Type.STRING,
+          description: "Nivel de certeza: Alta, Media o Baja",
+        },
+      },
+      required: ["questionText", "directAnswer", "explanation"],
+    };
+
     try {
       try {
         response = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: "gemini-3.6-flash",
           contents: {
             parts: [
               {
@@ -143,62 +234,18 @@ app.post("/api/answer-question", async (req, res) => {
                   data: base64Data,
                 },
               },
-              {
-                text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
-Tu tarea primordial es entregar la RESPUESTA CORRECTA exacta, clara y directa.
-
-Sigue estas reglas strictly:
-1. Transcribe la pregunta de la imagen.
-2. Identifica la respuesta correcta. Si es de opción múltiple, especifica claramente la opción (ej: "Opción B: 25 km/h") y resáltala. Si es una pregunta de desarrollo o cálculo, da el resultado final exacto.
-3. Si hay opciones múltiples en la imagen, extáelas en una lista e indica el índice exacto (0-based) de la opción correcta.
-4. Escribe una explicación muy concisa (1 a 3 frases) del razonamiento.
-5. Clasifica la asignatura o tema (ej. Matemáticas, Biología, Historia, Física, Inglés, etc.).`,
-              },
+              { text: visionPrompt },
             ],
           },
           config: {
             responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                questionText: {
-                  type: Type.STRING,
-                  description: "Texto exacto de la pregunta transcrito de la foto",
-                },
-                directAnswer: {
-                  type: Type.STRING,
-                  description: "La respuesta correcta directa y destacada",
-                },
-                options: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: "Opciones de respuesta si la pregunta es de opción múltiple",
-                },
-                correctOptionIndex: {
-                  type: Type.INTEGER,
-                  description: "Índice 0-based de la opción correcta si aplica, o -1",
-                },
-                explanation: {
-                  type: Type.STRING,
-                  description: "Breve justificación o explicación de la respuesta",
-                },
-                subject: {
-                  type: Type.STRING,
-                  description: "Materia o área temática de la pregunta",
-                },
-                confidence: {
-                  type: Type.STRING,
-                  description: "Nivel de certeza: Alta, Media o Baja",
-                },
-              },
-              required: ["questionText", "directAnswer", "explanation"],
-            },
+            responseSchema: jsonSchema,
           },
         });
       } catch (primaryModelErr: any) {
-        console.warn("Fallo con gemini-2.5-flash, reintentando con gemini-2.0-flash:", primaryModelErr.message || primaryModelErr);
+        console.warn("Reintentando visión con gemini-3.1-pro-preview:", primaryModelErr.message || primaryModelErr);
         response = await ai.models.generateContent({
-          model: "gemini-2.0-flash",
+          model: "gemini-3.1-pro-preview",
           contents: {
             parts: [
               {
@@ -207,14 +254,12 @@ Sigue estas reglas strictly:
                   data: base64Data,
                 },
               },
-              {
-                text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
-Tu tarea primordial es entregar la RESPUESTA CORRECTA exacta, clara y directa. Transcribe la pregunta, indica la respuesta correcta, opciones si las hay, explicación y materia en formato JSON.`,
-              },
+              { text: visionPrompt },
             ],
           },
           config: {
             responseMimeType: "application/json",
+            responseSchema: jsonSchema,
           },
         });
       }
