@@ -28,6 +28,55 @@ function getGeminiClient() {
   });
 }
 
+// Helper function to call OpenAI Vision API
+async function executeOpenAiVisionRequest(apiKey: string, mimeType: string, base64Data: string) {
+  const openAiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey.trim()}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Eres un asistente experto en resolver exámenes y preguntas. Analiza la imagen. Devuelve un objeto JSON con los campos: questionText (string), directAnswer (string enérgico y conciso con la respuesta correcta), options (array de strings opcional), correctOptionIndex (number opcional -1 si no aplica), explanation (string breve), subject (string), confidence ('Alta'|'Media'|'Baja').",
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Obtén ÚNICAMENTE la respuesta correcta a la pregunta de la imagen." },
+            { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Data}` } },
+          ],
+        },
+      ],
+    }),
+  });
+
+  if (!openAiResponse.ok) {
+    const errData = await openAiResponse.json().catch(() => ({}));
+    throw new Error(errData.error?.message || `Error de OpenAI status ${openAiResponse.status}`);
+  }
+
+  const openAiData = await openAiResponse.json();
+  const contentStr = openAiData.choices?.[0]?.message?.content;
+  if (!contentStr) throw new Error("Respuesta vacía de OpenAI");
+
+  const parsed = JSON.parse(contentStr);
+  return {
+    questionText: parsed.questionText || "Pregunta detectada en la imagen",
+    directAnswer: parsed.directAnswer || "No se pudo determinar la respuesta",
+    options: Array.isArray(parsed.options) ? parsed.options : undefined,
+    correctOptionIndex: typeof parsed.correctOptionIndex === "number" && parsed.correctOptionIndex >= 0 ? parsed.correctOptionIndex : null,
+    explanation: parsed.explanation || "Respuesta generada automáticamente.",
+    subject: parsed.subject || "General",
+    confidence: parsed.confidence || "Alta",
+  };
+}
+
 // API Health Check
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "FotoRespuesta API" });
@@ -59,81 +108,43 @@ app.post("/api/answer-question", async (req, res) => {
       }
     }
 
-    // Option 1: User requested OpenAI API explicitly with custom key
+    const serverOpenAiKey = process.env.OPENAI_API_KEY;
+    const effectiveOpenAiKey = (openAiApiKey && openAiApiKey.trim()) || (serverOpenAiKey && serverOpenAiKey.trim());
+
+    // Option 1: User explicitly requested OpenAI API with custom key in request body
     if (openAiApiKey && openAiApiKey.trim().length > 10) {
       try {
-        const openAiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${openAiApiKey.trim()}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            response_format: { type: "json_object" },
-            messages: [
-              {
-                role: "system",
-                content:
-                  "Eres un asistente experto en resolver exámenes y preguntas. Analiza la imagen. Devuelve un objeto JSON con los campos: questionText (string), directAnswer (string enérgico y conciso con la respuesta correcta), options (array de strings opcional), correctOptionIndex (number opcional -1 si no aplica), explanation (string breve), subject (string), confidence ('Alta'|'Media'|'Baja').",
-              },
-              {
-                role: "user",
-                content: [
-                  { type: "text", text: "Obtén ÚNICAMENTE la respuesta correcta a la pregunta de la imagen." },
-                  { type: "image_url", image_url: { url: `data:${mimeType};base64,${base64Data}` } },
-                ],
-              },
-            ],
-          }),
-        });
-
-        if (!openAiResponse.ok) {
-          const errData = await openAiResponse.json().catch(() => ({}));
-          throw new Error(errData.error?.message || `Error de OpenAI status ${openAiResponse.status}`);
-        }
-
-        const openAiData = await openAiResponse.json();
-        const contentStr = openAiData.choices?.[0]?.message?.content;
-        if (!contentStr) throw new Error("Respuesta vacía de OpenAI");
-
-        const parsed = JSON.parse(contentStr);
+        const data = await executeOpenAiVisionRequest(openAiApiKey.trim(), mimeType, base64Data);
         return res.json({
           success: true,
           providerUsed: "openai",
-          data: {
-            questionText: parsed.questionText || "Pregunta detectada en la imagen",
-            directAnswer: parsed.directAnswer || "No se pudo determinar la respuesta",
-            options: Array.isArray(parsed.options) ? parsed.options : undefined,
-            correctOptionIndex: typeof parsed.correctOptionIndex === "number" && parsed.correctOptionIndex >= 0 ? parsed.correctOptionIndex : null,
-            explanation: parsed.explanation || "Respuesta generada automáticamente.",
-            subject: parsed.subject || "General",
-            confidence: parsed.confidence || "Alta",
-          },
+          data,
         });
       } catch (openAiErr: any) {
-        console.error("Error en llamada a OpenAI:", openAiErr);
-        // Fallback to Gemini if OpenAI custom key failed
+        console.error("Error en llamada a OpenAI (custom key):", openAiErr);
+        // Fallback to Gemini if explicit key failed
       }
     }
 
-    // Default & Preferred: Gemini Vision Server-Side call
+    // Option 2 (Primary): Gemini Vision Server-Side call
     const ai = getGeminiClient();
-
     let response;
+    let geminiError: any = null;
+
     try {
-      response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: mimeType || "image/jpeg",
-                data: base64Data,
+      try {
+        response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || "image/jpeg",
+                  data: base64Data,
+                },
               },
-            },
-            {
-              text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
+              {
+                text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
 Tu tarea primordial es entregar la RESPUESTA CORRECTA exacta, clara y directa.
 
 Sigue estas reglas strictly:
@@ -142,97 +153,120 @@ Sigue estas reglas strictly:
 3. Si hay opciones múltiples en la imagen, extáelas en una lista e indica el índice exacto (0-based) de la opción correcta.
 4. Escribe una explicación muy concisa (1 a 3 frases) del razonamiento.
 5. Clasifica la asignatura o tema (ej. Matemáticas, Biología, Historia, Física, Inglés, etc.).`,
-            },
-          ],
-        },
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              questionText: {
-                type: Type.STRING,
-                description: "Texto exacto de la pregunta transcrito de la foto",
               },
-              directAnswer: {
-                type: Type.STRING,
-                description: "La respuesta correcta directa y destacada",
-              },
-              options: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: "Opciones de respuesta si la pregunta es de opción múltiple",
-              },
-              correctOptionIndex: {
-                type: Type.INTEGER,
-                description: "Índice 0-based de la opción correcta si aplica, o -1",
-              },
-              explanation: {
-                type: Type.STRING,
-                description: "Breve justificación o explicación de la respuesta",
-              },
-              subject: {
-                type: Type.STRING,
-                description: "Materia o área temática de la pregunta",
-              },
-              confidence: {
-                type: Type.STRING,
-                description: "Nivel de certeza: Alta, Media o Baja",
-              },
-            },
-            required: ["questionText", "directAnswer", "explanation"],
+            ],
           },
-        },
-      });
-    } catch (primaryModelErr: any) {
-      console.warn("Fallo con gemini-2.5-flash, reintentando con gemini-2.0-flash:", primaryModelErr.message || primaryModelErr);
-      response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: mimeType || "image/jpeg",
-                data: base64Data,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                questionText: {
+                  type: Type.STRING,
+                  description: "Texto exacto de la pregunta transcrito de la foto",
+                },
+                directAnswer: {
+                  type: Type.STRING,
+                  description: "La respuesta correcta directa y destacada",
+                },
+                options: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: "Opciones de respuesta si la pregunta es de opción múltiple",
+                },
+                correctOptionIndex: {
+                  type: Type.INTEGER,
+                  description: "Índice 0-based de la opción correcta si aplica, o -1",
+                },
+                explanation: {
+                  type: Type.STRING,
+                  description: "Breve justificación o explicación de la respuesta",
+                },
+                subject: {
+                  type: Type.STRING,
+                  description: "Materia o área temática de la pregunta",
+                },
+                confidence: {
+                  type: Type.STRING,
+                  description: "Nivel de certeza: Alta, Media o Baja",
+                },
               },
+              required: ["questionText", "directAnswer", "explanation"],
             },
-            {
-              text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
+          },
+        });
+      } catch (primaryModelErr: any) {
+        console.warn("Fallo con gemini-2.5-flash, reintentando con gemini-2.0-flash:", primaryModelErr.message || primaryModelErr);
+        response = await ai.models.generateContent({
+          model: "gemini-2.0-flash",
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || "image/jpeg",
+                  data: base64Data,
+                },
+              },
+              {
+                text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
 Tu tarea primordial es entregar la RESPUESTA CORRECTA exacta, clara y directa. Transcribe la pregunta, indica la respuesta correcta, opciones si las hay, explicación y materia en formato JSON.`,
-            },
-          ],
-        },
-        config: {
-          responseMimeType: "application/json",
+              },
+            ],
+          },
+          config: {
+            responseMimeType: "application/json",
+          },
+        });
+      }
+
+      const resultText = response?.text;
+      if (!resultText) {
+        throw new Error("No se obtuvo texto de respuesta del modelo de visión Gemini.");
+      }
+
+      const parsedData = JSON.parse(resultText);
+
+      return res.json({
+        success: true,
+        providerUsed: "gemini",
+        data: {
+          questionText: parsedData.questionText || "Pregunta en la foto",
+          directAnswer: parsedData.directAnswer || "Respuesta procesada",
+          options: Array.isArray(parsedData.options) && parsedData.options.length > 0 ? parsedData.options : undefined,
+          correctOptionIndex:
+            typeof parsedData.correctOptionIndex === "number" && parsedData.correctOptionIndex >= 0
+              ? parsedData.correctOptionIndex
+              : null,
+          explanation: parsedData.explanation || "",
+          subject: parsedData.subject || "General",
+          confidence: (parsedData.confidence as any) || "Alta",
         },
       });
+    } catch (err: any) {
+      geminiError = err;
+      console.warn("Gemini falló (límite de cuota o error). Evaluando respaldo con ChatGPT (OpenAI)... Error:", err.message || err);
     }
 
-    const resultText = response?.text;
-    if (!resultText) {
-      throw new Error("No se obtuvo texto de respuesta del modelo de visión IA.");
+    // Option 3: Fallback to ChatGPT (OpenAI API) if Gemini failed and an OpenAI key is set
+    if (effectiveOpenAiKey && effectiveOpenAiKey.length > 10) {
+      try {
+        console.log("Activando respaldo automático con ChatGPT (OpenAI API)...");
+        const data = await executeOpenAiVisionRequest(effectiveOpenAiKey, mimeType, base64Data);
+        return res.json({
+          success: true,
+          providerUsed: "openai",
+          isFallback: true,
+          data,
+        });
+      } catch (openAiFallbackErr: any) {
+        console.error("Error en fallback a OpenAI:", openAiFallbackErr);
+      }
     }
 
-    const parsedData = JSON.parse(resultText);
-
-    return res.json({
-      success: true,
-      providerUsed: "gemini",
-      data: {
-        questionText: parsedData.questionText || "Pregunta en la foto",
-        directAnswer: parsedData.directAnswer || "Respuesta procesada",
-        options: Array.isArray(parsedData.options) && parsedData.options.length > 0 ? parsedData.options : undefined,
-        correctOptionIndex:
-          typeof parsedData.correctOptionIndex === "number" && parsedData.correctOptionIndex >= 0
-            ? parsedData.correctOptionIndex
-            : null,
-        explanation: parsedData.explanation || "",
-        subject: parsedData.subject || "General",
-        confidence: (parsedData.confidence as any) || "Alta",
-      },
-    });
+    // If both Gemini and OpenAI failed (or no OpenAI key configured)
+    throw geminiError || new Error("Error al procesar la imagen con las IA disponibles.");
   } catch (err: any) {
-    console.error("Error al procesar la foto de la pregunta:", err);
+    console.error("Error final al procesar la foto de la pregunta:", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Ocurrió un error al analizar la imagen. Por favor asegúrate de que la foto sea clara y con buena luz.",
