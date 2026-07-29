@@ -13,7 +13,8 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
+  const nativeCameraInputRef = useRef<HTMLInputElement | null>(null);
 
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -30,7 +31,7 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
     }).catch(() => {});
   }, []);
 
-  // Start video stream
+  // Start video stream with fallback constraint logic
   const startCamera = useCallback(async () => {
     setCameraError(null);
     if (stream) {
@@ -39,31 +40,64 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
 
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('El navegador no soporta el acceso directo a la cámara.');
+        throw new Error('El navegador no soporta el acceso directo a la cámara web.');
       }
 
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: facingMode,
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: false,
-      });
+      let newStream: MediaStream | null = null;
+      // Constraint level 1: ideal resolution & facing mode
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: facingMode,
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+      } catch (err1) {
+        // Constraint level 2: facing mode only
+        try {
+          newStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: facingMode },
+            audio: false,
+          });
+        } catch (err2) {
+          // Constraint level 3: basic video
+          newStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        }
+      }
+
+      if (!newStream) {
+        throw new Error('No se pudo inicializar la secuencia de video.');
+      }
 
       setStream(newStream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = newStream;
-      }
       setIsCameraActive(true);
     } catch (err: any) {
-      console.warn('No se pudo acceder a la cámara:', err);
+      console.warn('No se pudo acceder a la cámara en vivo:', err);
       setIsCameraActive(false);
-      setCameraError(
-        'No se pudo conectar a la cámara. Puedes subir una imagen o tomar una foto seleccionando tu galería.'
-      );
+      let message = 'No se pudo conectar a la cámara en vivo.';
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        message = 'Permiso denegado. Presiona "Activar Cámara En Vivo" o usa "Tomar Foto con Cámara Nativa".';
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        message = 'No se detectó cámara web. Puedes tomar una foto usando la cámara de tu dispositivo.';
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        message = 'La cámara está ocupada por otra app. Cierra la otra app o usa la cámara nativa.';
+      }
+      setCameraError(message);
     }
   }, [facingMode]);
+
+  // Bind video element srcObject when video element mounts or stream changes
+  useEffect(() => {
+    if (isCameraActive && videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play().catch((e) => console.warn('Error al reproducir video:', e));
+    }
+  }, [isCameraActive, stream]);
 
   useEffect(() => {
     startCamera();
@@ -182,31 +216,50 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
             }`}
           />
         ) : (
-          <div className="flex flex-col items-center text-center p-6 space-y-4 max-w-xs">
+          <div className="flex flex-col items-center text-center p-6 space-y-4 max-w-sm">
             <div className="w-16 h-16 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400 shadow-inner">
-              <ImageIcon className="w-8 h-8 text-emerald-400" />
+              <Camera className="w-8 h-8 text-emerald-400" />
             </div>
             <div>
               <p className="text-slate-200 font-semibold text-sm">
-                Selecciona o arrastra una imagen de la pregunta
+                Apunta o sube una imagen de la pregunta
               </p>
               <p className="text-slate-400 text-xs mt-1">
-                O pega una foto del portapapeles (Ctrl+V)
+                Puedes transmitir en vivo, tomar foto con la app de cámara o subir de tu galería
               </p>
             </div>
             {cameraError && (
-              <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-300 text-xs flex items-start gap-2">
+              <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-300 text-xs flex items-start gap-2 text-left">
                 <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <span>{cameraError}</span>
               </div>
             )}
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="px-5 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl shadow-lg shadow-emerald-500/20 transition-all active:scale-95 flex items-center gap-2"
-            >
-              <Upload className="w-4 h-4" />
-              Sube foto de la pregunta
-            </button>
+            
+            <div className="flex flex-col gap-2.5 w-full pt-1">
+              <button
+                onClick={startCamera}
+                className="w-full py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-xl shadow-lg shadow-emerald-500/20 transition-all active:scale-95 flex items-center justify-center gap-2"
+              >
+                <Camera className="w-4 h-4" />
+                Activar Cámara En Vivo
+              </button>
+
+              <button
+                onClick={() => nativeCameraInputRef.current?.click()}
+                className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs rounded-xl border border-slate-700 transition-all active:scale-95 flex items-center justify-center gap-2"
+              >
+                <Camera className="w-4 h-4 text-emerald-400" />
+                Tomar Foto (Cámara Nativa)
+              </button>
+
+              <button
+                onClick={() => galleryInputRef.current?.click()}
+                className="w-full py-2 px-4 bg-transparent hover:bg-slate-900 text-slate-400 hover:text-slate-200 font-medium text-xs rounded-xl transition-all flex items-center justify-center gap-2"
+              >
+                <Upload className="w-4 h-4" />
+                Elegir de la Galería
+              </button>
+            </div>
           </div>
         )}
 
@@ -239,7 +292,7 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
             <div className="pointer-events-auto flex items-center justify-around w-full max-w-sm mx-auto bg-slate-900/80 backdrop-blur-lg px-4 py-3 rounded-full border border-slate-700/60 shadow-2xl">
               {/* Gallery upload */}
               <button
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => galleryInputRef.current?.click()}
                 className="p-3 rounded-full bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-all active:scale-90"
                 title="Subir imagen desde galería"
               >
@@ -277,28 +330,37 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
         )}
       </div>
 
-      {/* Hidden File Input */}
+      {/* Hidden File Inputs */}
+      {/* Native Camera trigger for mobile browsers */}
       <input
-        ref={fileInputRef}
+        ref={nativeCameraInputRef}
         type="file"
         accept="image/*"
         capture="environment"
         onChange={handleFileChange}
         className="hidden"
       />
+      {/* Gallery file selection */}
+      <input
+        ref={galleryInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleFileChange}
+        className="hidden"
+      />
 
       {/* Quick Action Footer / Alternative Input Guidance */}
-      <div className="flex items-center justify-between text-xs text-slate-400 px-2 bg-slate-900/50 p-2.5 rounded-2xl border border-slate-800/80">
+      <div className="flex items-center justify-between text-xs text-slate-400 px-3 py-2.5 bg-slate-900/50 rounded-2xl border border-slate-800/80">
         <div className="flex items-center gap-1.5">
           <Zap className="w-4 h-4 text-emerald-400" />
           <span>Formato: Opción múltiple, ejercicios o preguntas abiertas</span>
         </div>
         <button
-          onClick={() => fileInputRef.current?.click()}
-          className="text-emerald-400 hover:underline font-semibold flex items-center gap-1"
+          onClick={() => nativeCameraInputRef.current?.click()}
+          className="text-emerald-400 hover:underline font-semibold flex items-center gap-1 shrink-0 ml-2"
         >
-          <Upload className="w-3.5 h-3.5" />
-          Galería
+          <Camera className="w-3.5 h-3.5" />
+          Foto Cámara
         </button>
       </div>
     </div>
