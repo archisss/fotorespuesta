@@ -190,6 +190,24 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
     setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'));
   };
 
+  // Perform automatic 2-step camera cycle on initial launch for iOS WebKit black screen workaround
+  const [hasAutoWarmedUp, setHasAutoWarmedUp] = useState(false);
+
+  useEffect(() => {
+    if (isCameraActive && facingMode === 'environment' && !hasAutoWarmedUp) {
+      setHasAutoWarmedUp(true);
+      // Automatically cycle facingMode (user -> environment) to wake up iOS rear camera hardware
+      const timer1 = setTimeout(() => {
+        setFacingMode('user');
+        const timer2 = setTimeout(() => {
+          setFacingMode('environment');
+        }, 400);
+        return () => clearTimeout(timer2);
+      }, 300);
+      return () => clearTimeout(timer1);
+    }
+  }, [isCameraActive, facingMode, hasAutoWarmedUp]);
+
   // Capture photo from video stream
   const capturePhoto = () => {
     if (!videoRef.current || isLoading) return;
@@ -393,17 +411,13 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
               </button>
 
               {/* Switch Camera */}
-              {hasMultipleCameras ? (
-                <button
-                  onClick={toggleCamera}
-                  className="p-3 rounded-full bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-all active:scale-90"
-                  title="Cambiar cámara"
-                >
-                  <RotateCw className="w-5 h-5" />
-                </button>
-              ) : (
-                <div className="w-11" />
-              )}
+              <button
+                onClick={toggleCamera}
+                className="p-3 rounded-full bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-all active:scale-90"
+                title="Girar cámara (Frontal / Trasera)"
+              >
+                <RotateCw className="w-5 h-5" />
+              </button>
             </div>
           </div>
         )}
