@@ -1,0 +1,10 @@
+{
+  "name": "FotoRespuesta",
+  "description": "Toma una foto a cualquier pregunta de examen o tarea y obtén instantáneamente la respuesta correcta.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
