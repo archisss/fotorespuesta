@@ -1,0 +1,9 @@
+[variables]
+NPM_CONFIG_INCLUDE = "optional"
+NPM_CONFIG_PRODUCTION = "false"
+
+[phases.install]
+cmds = ["npm install --include=optional"]
+
+[phases.build]
+cmds = ["npm run build"]
