@@ -31,7 +31,7 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
     }).catch(() => {});
   }, []);
 
-  // Start video stream with fallback constraint logic
+  // Start video stream with automatic iOS permission warmup & camera targeting
   const startCamera = useCallback(async () => {
     setCameraError(null);
     if (stream) {
@@ -43,30 +43,107 @@ export const CameraScanner: React.FC<CameraScannerProps> = ({
         throw new Error('El navegador no soporta el acceso directo a la cámara web.');
       }
 
+      // Step 1: Warmup & inspect devices if labels are missing (iOS initial permission requirement)
+      let devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      let videoDevices = devices.filter((d) => d.kind === 'videoinput');
+      setHasMultipleCameras(videoDevices.length > 1);
+
+      // Check if permission is needed to expose device labels or warm up permission state on iOS
+      if (videoDevices.length === 0 || !videoDevices.some((d) => d.label)) {
+        try {
+          const warmupStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          // Immediately stop warmup tracks
+          warmupStream.getTracks().forEach((track) => track.stop());
+          // Re-enumerate devices with full labels available
+          devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+          videoDevices = devices.filter((d) => d.kind === 'videoinput');
+          setHasMultipleCameras(videoDevices.length > 1);
+        } catch (e) {
+          // Warmup error, proceed with constraint-based request
+        }
+      }
+
+      // Find specific rear or front camera deviceId if labels are present
+      let targetDeviceId: string | undefined = undefined;
+      if (facingMode === 'environment' && videoDevices.length > 0) {
+        const backDevice = videoDevices.find((d) => {
+          const l = d.label.toLowerCase();
+          return (
+            l.includes('back') ||
+            l.includes('rear') ||
+            l.includes('trasera') ||
+            l.includes('environment') ||
+            l.includes('0')
+          );
+        }) || (videoDevices.length > 1 ? videoDevices[videoDevices.length - 1] : undefined);
+
+        if (backDevice?.deviceId) {
+          targetDeviceId = backDevice.deviceId;
+        }
+      } else if (facingMode === 'user' && videoDevices.length > 0) {
+        const frontDevice = videoDevices.find((d) => {
+          const l = d.label.toLowerCase();
+          return (
+            l.includes('front') ||
+            l.includes('frontal') ||
+            l.includes('user') ||
+            l.includes('selfie')
+          );
+        }) || videoDevices[0];
+
+        if (frontDevice?.deviceId) {
+          targetDeviceId = frontDevice.deviceId;
+        }
+      }
+
       let newStream: MediaStream | null = null;
-      // Constraint level 1: ideal resolution & facing mode
-      try {
-        newStream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: facingMode,
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-          audio: false,
-        });
-      } catch (err1) {
-        // Constraint level 2: facing mode only
+
+      // Try 1: Specific deviceId (best for multi-lens iOS devices like iPhone 17 Pro)
+      if (targetDeviceId) {
         try {
           newStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: facingMode },
+            video: {
+              deviceId: { exact: targetDeviceId },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+            },
             audio: false,
           });
-        } catch (err2) {
-          // Constraint level 3: basic video
+        } catch (errId) {
+          try {
+            newStream = await navigator.mediaDevices.getUserMedia({
+              video: { deviceId: targetDeviceId },
+              audio: false,
+            });
+          } catch (e) {}
+        }
+      }
+
+      // Try 2: facingMode ideal + 1080p
+      if (!newStream) {
+        try {
           newStream = await navigator.mediaDevices.getUserMedia({
-            video: true,
+            video: {
+              facingMode: { ideal: facingMode },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+            },
             audio: false,
           });
+        } catch (err1) {
+          // Try 3: facingMode exact / simple
+          try {
+            newStream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: facingMode },
+              audio: false,
+            });
+          } catch (err2) {
+            // Try 4: generic video
+            newStream = await navigator.mediaDevices.getUserMedia({
+              video: true,
+              audio: false,
+            });
+          }
         }
       }
 
