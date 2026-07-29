@@ -120,72 +120,97 @@ app.post("/api/answer-question", async (req, res) => {
     // Default & Preferred: Gemini Vision Server-Side call
     const ai = getGeminiClient();
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.6-flash",
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: mimeType || "image/jpeg",
-              data: base64Data,
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType || "image/jpeg",
+                data: base64Data,
+              },
             },
-          },
-          {
-            text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
+            {
+              text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
 Tu tarea primordial es entregar la RESPUESTA CORRECTA exacta, clara y directa.
 
-Sigue estas reglas estrictas:
+Sigue estas reglas strictly:
 1. Transcribe la pregunta de la imagen.
 2. Identifica la respuesta correcta. Si es de opción múltiple, especifica claramente la opción (ej: "Opción B: 25 km/h") y resáltala. Si es una pregunta de desarrollo o cálculo, da el resultado final exacto.
 3. Si hay opciones múltiples en la imagen, extáelas en una lista e indica el índice exacto (0-based) de la opción correcta.
 4. Escribe una explicación muy concisa (1 a 3 frases) del razonamiento.
 5. Clasifica la asignatura o tema (ej. Matemáticas, Biología, Historia, Física, Inglés, etc.).`,
-          },
-        ],
-      },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            questionText: {
-              type: Type.STRING,
-              description: "Texto exacto de la pregunta transcrito de la foto",
             },
-            directAnswer: {
-              type: Type.STRING,
-              description: "La respuesta correcta directa y destacada",
-            },
-            options: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-              description: "Opciones de respuesta si la pregunta es de opción múltiple",
-            },
-            correctOptionIndex: {
-              type: Type.INTEGER,
-              description: "Índice 0-based de la opción correcta si aplica, o -1",
-            },
-            explanation: {
-              type: Type.STRING,
-              description: "Breve justificación o explicación de la respuesta",
-            },
-            subject: {
-              type: Type.STRING,
-              description: "Materia o área temática de la pregunta",
-            },
-            confidence: {
-              type: Type.STRING,
-              description: "Nivel de certeza: Alta, Media o Baja",
-            },
-          },
-          required: ["questionText", "directAnswer", "explanation"],
+          ],
         },
-      },
-    });
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              questionText: {
+                type: Type.STRING,
+                description: "Texto exacto de la pregunta transcrito de la foto",
+              },
+              directAnswer: {
+                type: Type.STRING,
+                description: "La respuesta correcta directa y destacada",
+              },
+              options: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "Opciones de respuesta si la pregunta es de opción múltiple",
+              },
+              correctOptionIndex: {
+                type: Type.INTEGER,
+                description: "Índice 0-based de la opción correcta si aplica, o -1",
+              },
+              explanation: {
+                type: Type.STRING,
+                description: "Breve justificación o explicación de la respuesta",
+              },
+              subject: {
+                type: Type.STRING,
+                description: "Materia o área temática de la pregunta",
+              },
+              confidence: {
+                type: Type.STRING,
+                description: "Nivel de certeza: Alta, Media o Baja",
+              },
+            },
+            required: ["questionText", "directAnswer", "explanation"],
+          },
+        },
+      });
+    } catch (primaryModelErr: any) {
+      console.warn("Fallo con gemini-2.5-flash, reintentando con gemini-2.0-flash:", primaryModelErr.message || primaryModelErr);
+      response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType || "image/jpeg",
+                data: base64Data,
+              },
+            },
+            {
+              text: `Analiza minuciosamente la imagen proporcionada. Contiene una pregunta de examen, cuestionario, libro o pantalla.
+Tu tarea primordial es entregar la RESPUESTA CORRECTA exacta, clara y directa. Transcribe la pregunta, indica la respuesta correcta, opciones si las hay, explicación y materia en formato JSON.`,
+            },
+          ],
+        },
+        config: {
+          responseMimeType: "application/json",
+        },
+      });
+    }
 
-    const resultText = response.text;
+    const resultText = response?.text;
     if (!resultText) {
-      throw new Error("No se obtuvo respuesta del modelo de visión IA.");
+      throw new Error("No se obtuvo texto de respuesta del modelo de visión IA.");
     }
 
     const parsedData = JSON.parse(resultText);
